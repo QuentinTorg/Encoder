@@ -29,6 +29,9 @@
 #ifndef EncoderMod_h_
 #define EncoderMod_h_
 
+#define RATE_BUFFER_SIZE 100
+#define RATE_BUFFER_TIME_STEP 50
+
 #if defined(ARDUINO) && ARDUINO >= 100
 #include "Arduino.h"
 #elif defined(WIRING)
@@ -68,7 +71,10 @@ typedef struct {
     float rate;
     float rate1;
     float rate2;
-    float previousRate;
+    float previousRateBuffer[RATE_BUFFER_SIZE];
+    uint8_t previousRateBufferIndex;
+    float previousRateBufferSum;
+    uint8_t bufferSlotsToReplace;
     float accel;
     bool lastRateTimer;
 } Encoder_internal_state_t;
@@ -102,7 +108,9 @@ public:
         encoder.rate = 0;
         encoder.rate1 = 0;
         encoder.rate2 = 0;
-        encoder.previousRate = 0;
+        memset(encoder.previousRateBuffer, 0, RATE_BUFFER_SIZE * sizeof(float));
+        encoder.previousRateBufferIndex = 0;
+        encoder.previousRateBufferSum = 0;
         encoder.accel = 0;
         encoder.lastRateTimer = 0;
 		if (DIRECT_PIN_READ(encoder.pin1_register, encoder.pin1_bitmask)) s |= 1;
@@ -146,9 +154,8 @@ public:
         }
         float lastRate = encoder.rate;
         float elapsedTime = encoder.stepTime;
-        float lastAccel = encoder.accel;
         SREG = old_SREG;
-        float extrapolatedPosition = lastRate * elapsedTime + 0.5 * lastAccel * elapsedTime * elapsedTime;
+        float extrapolatedPosition = lastRate * elapsedTime;
         if (extrapolatedPosition > 1) {
             return (1 / elapsedTime);
         }
@@ -156,7 +163,7 @@ public:
             return (-1 / elapsedTime);
         }
         else {
-            return (lastRate + lastAccel * elapsedTime);
+            return (encoder.previousRateBufferSum) / RATE_BUFFER_SIZE;
         }
     }
     inline float extrapolate() {
@@ -369,12 +376,32 @@ private:
 		arg->state = (state >> 2);
 		switch (state) {
 			case 1: case 7: case 8: case 14:
-                arg->previousRate = arg->rate;  // remember previous rate for calculating
+                // remember previous rate for calculating
+                arg->bufferSlotsToReplace = arg->stepTime / RATE_BUFFER_TIME_STEP;
+                if (arg->bufferSlotsToReplace == 0) {
+                    arg->bufferSlotsToReplace = 1;
+                }
+
+                if (arg->bufferSlotsToReplace >= RATE_BUFFER_SIZE) {
+                    arg->bufferSlotsToReplace = RATE_BUFFER_SIZE;
+                }
+
+                for (; arg->bufferSlotsToReplace > 0; arg->bufferSlotsToReplace--) {
+                  arg->previousRateBufferSum -= arg->previousRateBuffer[arg->previousRateBufferIndex];
+                  arg->previousRateBufferSum += arg->rate;
+                  arg->previousRateBuffer[arg->previousRateBufferIndex] = arg->rate;
+                  arg->previousRateBufferIndex = (arg->previousRateBufferIndex + 1) % RATE_BUFFER_SIZE;
+                }
+
                 if (arg->position % 2 == 0) {  // if the previous position was even (0 to 1 step)
                     arg->rate1 = 0.5 / arg->stepTime; // the 0 to 1 step rate is set to rate1
                     if (arg->lastRateTimer == 0) { // if the 0 to 1 step was the previous one calculated
                         arg->rate2 = 0; // then the rate2 step was skipped due to a direction change, so set it to zero
-                        arg->previousRate = 0; // previous rate is also set to zero.  there may be a better way but I have yet to think about it
+
+                        // previous rate is also set to zero.  there may be a better way but I have yet to think about it
+                        memset(arg->previousRateBuffer, 0, RATE_BUFFER_SIZE * sizeof(float));
+                        arg->previousRateBufferIndex = 0;
+                        arg->previousRateBufferSum = 0;
                     }
                     arg->lastRateTimer = 0; // remember that rate1 was the last one calculated
                 }
@@ -382,22 +409,46 @@ private:
                     arg->rate2 = 0.5 / arg->stepTime; // the -1 to 0 step rate is set to rate2
                     if (arg->lastRateTimer == 1) { // if the -1 to 0 step was the previous one calculated
                         arg->rate1 = 0;  // then rate1 step was skipped due to direction change, so it is set to zero
-                        arg->previousRate = 0; // previous rate is also set to zero.  there may be a better way but I have yet to think about it
+
+                        // previous rate is also set to zero.  there may be a better way but I have yet to think about it
+                        memset(arg->previousRateBuffer, 0, RATE_BUFFER_SIZE * sizeof(float));
+                        arg->previousRateBufferIndex = 0;
+                        arg->previousRateBufferSum = 0;
                     }
                     arg->lastRateTimer = 1; // remember that rate2 was the last one calculated
                 }
                 arg->rate = (arg->rate1 + arg->rate2);
-                arg->accel = (arg->rate - arg->previousRate) / arg->stepTime;
+                arg->accel = (arg->rate - arg->previousRateBuffer[arg->previousRateBufferIndex]) / arg->stepTime;
                 arg->stepTime = 0;
                 arg->position++;
                 return;
 			case 2: case 4: case 11: case 13:
-                arg->previousRate = arg->rate;
+                // remember previous rate for calculating
+                arg->bufferSlotsToReplace = arg->stepTime / RATE_BUFFER_TIME_STEP;
+                if (arg->bufferSlotsToReplace == 0) {
+                    arg->bufferSlotsToReplace = 1;
+                }
+
+                if (arg->bufferSlotsToReplace >= RATE_BUFFER_SIZE) {
+                    arg->bufferSlotsToReplace = RATE_BUFFER_SIZE;
+                }
+
+                for (; arg->bufferSlotsToReplace > 0; arg->bufferSlotsToReplace--) {
+                  arg->previousRateBufferSum -= arg->previousRateBuffer[arg->previousRateBufferIndex];
+                  arg->previousRateBufferSum += arg->rate;
+                  arg->previousRateBuffer[arg->previousRateBufferIndex] = arg->rate;
+                  arg->previousRateBufferIndex = (arg->previousRateBufferIndex + 1) % RATE_BUFFER_SIZE;
+                }
+
                 if (arg->position % 2 != 0) {  // if the previous position was odd (1 to 0 step)
                     arg->rate1 = -0.5 / arg->stepTime; // the 1 to 0 step rate is set to rate1
                     if (arg->lastRateTimer == 0) {
                         arg->rate2 = 0;
-                        arg->previousRate = 0;
+
+                        // previous rate is also set to zero.  there may be a better way but I have yet to think about it
+                        memset(arg->previousRateBuffer, 0, RATE_BUFFER_SIZE * sizeof(float));
+                        arg->previousRateBufferIndex = 0;
+                        arg->previousRateBufferSum = 0;
                     }
                     arg->lastRateTimer = 0;
                 }
@@ -405,17 +456,37 @@ private:
                     arg->rate2 = -0.5 / arg->stepTime;
                     if (arg->lastRateTimer == 1) {
                         arg->rate1 = 0;
-                        arg->previousRate = 0;
+
+                        // previous rate is also set to zero.  there may be a better way but I have yet to think about it
+                        memset(arg->previousRateBuffer, 0, RATE_BUFFER_SIZE * sizeof(float));
+                        arg->previousRateBufferIndex = 0;
+                        arg->previousRateBufferSum = 0;
                     }
                     arg->lastRateTimer = 1;
                 }
                 arg->rate = (arg->rate1 + arg->rate2);
-                arg->accel = (arg->rate - arg->previousRate) / arg->stepTime;
+                arg->accel = (arg->rate - arg->previousRateBuffer[arg->previousRateBufferIndex]) / arg->stepTime;
                 arg->stepTime = 0;
                 arg->position--;
 				return;
             case 3: case 12:
-                arg->previousRate = arg->rate;
+                // remember previous rate for calculating
+                arg->bufferSlotsToReplace = arg->stepTime / RATE_BUFFER_TIME_STEP;
+                if (arg->bufferSlotsToReplace == 0) {
+                    arg->bufferSlotsToReplace = 1;
+                }
+
+                if (arg->bufferSlotsToReplace >= RATE_BUFFER_SIZE) {
+                    arg->bufferSlotsToReplace = RATE_BUFFER_SIZE;
+                }
+
+                for (; arg->bufferSlotsToReplace > 0; arg->bufferSlotsToReplace--) {
+                  arg->previousRateBufferSum -= arg->previousRateBuffer[arg->previousRateBufferIndex];
+                  arg->previousRateBufferSum += arg->rate;
+                  arg->previousRateBuffer[arg->previousRateBufferIndex] = arg->rate;
+                  arg->previousRateBufferIndex = (arg->previousRateBufferIndex + 1) % RATE_BUFFER_SIZE;
+                }
+
                 if (arg->position % 2 == 0) {
                     arg->rate1 = 1 / arg->stepTime;
                     arg->rate2 = arg->rate1;
@@ -426,12 +497,28 @@ private:
                     arg->rate1 = arg->rate2;
                     arg->rate = arg->rate2;
                 }
-                arg->accel = (arg->rate - arg->previousRate) / arg->stepTime;
+                arg->accel = (arg->rate - arg->previousRateBuffer[arg->previousRateBufferIndex]) / arg->stepTime;
                 arg->stepTime = 0;
                 arg->position += 2;
 				return;
 			case 6: case 9:
-                arg->previousRate = arg->rate;
+                // remember previous rate for calculating
+                arg->bufferSlotsToReplace = arg->stepTime / RATE_BUFFER_TIME_STEP;
+                if (arg->bufferSlotsToReplace == 0) {
+                    arg->bufferSlotsToReplace = 1;
+                }
+
+                if (arg->bufferSlotsToReplace >= RATE_BUFFER_SIZE) {
+                    arg->bufferSlotsToReplace = RATE_BUFFER_SIZE;
+                }
+
+                for (; arg->bufferSlotsToReplace > 0; arg->bufferSlotsToReplace--) {
+                  arg->previousRateBufferSum -= arg->previousRateBuffer[arg->previousRateBufferIndex];
+                  arg->previousRateBufferSum += arg->rate;
+                  arg->previousRateBuffer[arg->previousRateBufferIndex] = arg->rate;
+                  arg->previousRateBufferIndex = (arg->previousRateBufferIndex + 1) % RATE_BUFFER_SIZE;
+                }
+
                 if (arg->position % 2 != 0) {
                     arg->rate1 = -1 / arg->stepTime;
                     arg->rate2 = arg->rate1;
@@ -442,7 +529,7 @@ private:
                     arg->rate1 = arg->rate2;
                     arg->rate = arg->rate2;
                 }
-                arg->accel = (arg->rate - arg->previousRate) / arg->stepTime;
+                arg->accel = (arg->rate - arg->previousRateBuffer[arg->previousRateBufferIndex]) / arg->stepTime;
                 arg->stepTime = 0;
                 arg->position -= 2;
 				return;
